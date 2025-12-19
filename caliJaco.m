@@ -1,60 +1,63 @@
 function [E, J, params] = caliJaco(measurement_data, nominal_params, param_errors)
 % 串并混联机器人系统标定雅可比矩阵计算函数
 %
-% 修改点：
-%   使用 P 点测量位姿 + 名义 Franka FK 构造 F 点“测量位姿”
-%   不再使用 data_j.f_meas / data_j.theta_F_meas
-%   构造得到的 R_F_meas 已是末端坐标系旋转，不需要 dRF
-
-%% ============ 0. 开关：是否用 P 测量构造 F 测量 ============
-use_P_meas_build_F_meas = true;
-if isfield(nominal_params, 'use_P_meas_build_F_meas')
-    use_P_meas_build_F_meas = logical(nominal_params.use_P_meas_build_F_meas);
-end
+% 输入参数:
+%   measurement_data - 测量数据
+%   nominal_params   - 名义参数
+%   param_errors     - 参数误差
+%   T_G_M           - 测量坐标系到全局坐标系的变换矩阵
+%
+% 输出参数:
+%   E - 残差向量
+%   J - 雅可比矩阵
+%   params - 参数信息结构体
 
 %% 参数提取和初始化
 num_measurements = length(measurement_data);
 
-delta_A   = param_errors.delta_A;
-delta_B   = param_errors.delta_B;
-delta_l   = param_errors.delta_l;
-delta_phi = param_errors.delta_phi;   % 6x1
-delta_psi = param_errors.delta_psi;   % 6x1
+% 提取几何参数误差
+delta_A = param_errors.delta_A;
+delta_B = param_errors.delta_B;  
+delta_l = param_errors.delta_l;
+delta_phi = param_errors.delta_phi;  % 现在为6×1: [Δa4, Δa5, Δa7, Δd3, Δd5, Δd7]
+delta_psi = param_errors.delta_psi;  % 安装误差参数
 
-n_deltaA     = numel(delta_A);      % 18
-n_deltaB     = numel(delta_B);      % 18
-n_deltal     = numel(delta_l);      % 6
-n_deltaphi   = numel(delta_phi);    % 6
-n_delta_psi  = numel(delta_psi);    % 6
+% 参数维度 - 重要修改：n_deltaphi 从7改为6
+n_deltaA = numel(delta_A);     % 6×3 = 18
+n_deltaB = numel(delta_B);     % 6×3 = 18  
+n_deltal = numel(delta_l);     % 6 电缸个数
+n_deltaphi = numel(delta_phi); % 6 
+n_delta_psi = numel(delta_psi); % 6 (安装误差参数)
 
+% 每个测量点的局部参数维度 (位置3 + 姿态3 = 6)
 n_local_per_measurement = 6;
 n_local_total = num_measurements * n_local_per_measurement;
 
-n_total_params = n_deltaA + n_deltaB + n_deltal + n_delta_psi + n_deltaphi + n_local_total;
+% 总参数数量 
+n_total_params = n_deltaA + n_deltaB + n_deltal + n_deltaphi + n_delta_psi + n_local_total;
 
-%% 安装误差（用于“预测模型”）
+% 1. 位置部分 (保持线性叠加)
 p_PB_actual = nominal_params.delta_psi_nominal(1:3) + delta_psi(1:3);
 
+% 2. 姿态部分：旋转向量 -> 旋转矩阵（使用 exp map）
 rotvec_PB_nominal = nominal_params.delta_psi_nominal(4:6);
-rotvec_PB_error   = delta_psi(4:6);
+rotvec_PB_error = delta_psi(4:6);
 
-R_PB_nominal  = expSO3(rotvec_PB_nominal);
+R_PB_nominal = expSO3(rotvec_PB_nominal);
 Delta_R_error = expSO3(rotvec_PB_error);
-R_PB_actual   = R_PB_nominal * Delta_R_error;
+R_PB_actual = R_PB_nominal * Delta_R_error;
 
+% 3. 后续计算中，使用 R_PB_actual 和 p_PB_actual
 T_P_B_actual = [R_PB_actual, p_PB_actual; 0, 0, 0, 1];
 
-%% 名义安装（用于“构造测量的 F 位姿”）
-% 注意：这里必须用名义，否则你构造的“测量”会依赖待估参数，产生循环依赖
-p_PB_nom = nominal_params.delta_psi_nominal(1:3);
-R_PB_nom = expSO3(nominal_params.delta_psi_nominal(4:6));
+
 
 %% 定义参数索引范围（顺序：A, B, l, psi, phi, 局部参数）
-idx_deltaA     = 1:n_deltaA;
-idx_deltaB     = n_deltaA + (1:n_deltaB);
-idx_deltal     = n_deltaA + n_deltaB + (1:n_deltal);
-idx_delta_psi  = n_deltaA + n_deltaB + n_deltal + (1:n_delta_psi);
-idx_deltaphi   = n_deltaA + n_deltaB + n_deltal + n_delta_psi + (1:n_deltaphi);
+idx_deltaA = 1:n_deltaA;
+idx_deltaB = n_deltaA + (1:n_deltaB);
+idx_deltal = n_deltaA + n_deltaB + (1:n_deltal);
+idx_delta_psi = n_deltaA + n_deltaB + n_deltal + (1:n_delta_psi); 
+idx_deltaphi = n_deltaA + n_deltaB + n_deltal + n_delta_psi + (1:n_deltaphi);  % 现在只有6个
 
 local_param_indices = cell(num_measurements, 1);
 for j = 1:num_measurements
@@ -63,119 +66,82 @@ for j = 1:num_measurements
 end
 
 %% 初始化雅可比矩阵和残差向量
-n_residuals_per_measurement = 12;  % 6 limb + 6 serial
+n_residuals_per_measurement = 12;  % 6个支链 + 6个末端
 n_total_residuals = num_measurements * n_residuals_per_measurement;
 
 J = zeros(n_total_residuals, n_total_params);
 E = zeros(n_total_residuals, 1);
 
-%% ============ 主循环：每个测量点 ============
+
+%% 为每个测量点计算雅可比和残差
 for j = 1:num_measurements
 
-
+    % 提取当前测量数据
     data_j = measurement_data{j};
-
-    % 1) 腿长测量
-    l_meas_j = data_j.l_meas(:) + nominal_params.l0(:);
-
-    % 2) 关节角
-    q_serial_j = data_j.q_serial(:);
-
-    % 3) 构造 F 的“测量位姿”
-    if use_P_meas_build_F_meas
-
-        % ---- (a) 读取 P 测量（通常在测量坐标系 M 下） ----
-        pP_meas_M   = data_j.platform_position(:);
-        eulP_meas_M = data_j.theta_P_meas(:).';   % 1x3, 按 ZYX 约定
-
-        % ---- (b) 变换到全局 G：不需要 dRF ----
-        [pP_meas_G, R_GP_meas] = transform_pose_to_global_no_dRF( ...
-            pP_meas_M, eulP_meas_M, nominal_params.T_G_M);
-
-        % ---- (c) Franka 名义 FK：得到 B->F ----
-        % 你给的函数签名是 franka_forward_kinematics(q, dh_actual)
-        [~, R_BF_nom, f_B_nom, ~] = franka_forward_kinematics(q_serial_j, nominal_params.mdh_nominal);
-
-        % ---- (d) 名义安装：P->B ----
-        f_P_nom  = p_PB_nom + R_PB_nom * f_B_nom;        % F 在 P 中的位置
-        R_PF_nom = R_PB_nom * R_BF_nom;                  % F 相对 P 的旋转
-
-        % ---- (e) 得到 F 的测量位姿（全局） ----
-        f_meas_j = pP_meas_G + R_GP_meas * f_P_nom;
-        R_F_meas = R_GP_meas * R_PF_nom;
-
-    else
-        % 回退：使用原来 F 的测量并做 transform（包含 dRF）
-        f_meas_j = data_j.f_meas(:);
-        theta_F_meas_j = data_j.theta_F_meas(:);
-        [f_meas_j, R_F_meas] = transform_measurement_to_global( ...
+    l_meas_j = data_j.l_meas +  nominal_params.l0;  % 加上基础长度
+    f_meas_j = data_j.f_meas;
+    theta_F_meas_j = data_j.theta_F_meas;
+    q_serial_j = data_j.q_serial;
+    
+    % 将测量值转换到全局坐标系
+    [f_meas_j, R_GF] = transform_measurement_to_global(...
             f_meas_j, theta_F_meas_j, nominal_params.T_G_M);
-    end
+    f_meas_G(j,:)=f_meas_j;
+    R_GF_all(:,:,j)=R_GF;
 
-    % 4) 取局部变量（P 的“待优化”位姿）
+    % 提取当前测量点的局部参数（local_params_j 格式为 [dp(3), drotvec(3)])
     local_params_j = param_errors.local_params(j, :);   % 1x6
+    p_j = nominal_params.P_pose_nominal.p + local_params_j(1:3)';    % 3x1
 
-    p_j = nominal_params.P_pose_nominal.p + local_params_j(1:3)';   % 3x1
 
-    phi_Pj_nominal      = nominal_params.P_pose_nominal.rotvec(:);  % 3x1
-    delta_phi_Pj_local  = local_params_j(4:6)';                      % 3x1
+    % nominal rotation vector and local small rotation vector
+    phi_Pj_nominal = nominal_params.P_pose_nominal.rotvec(:);  % 3x1
+    delta_phi_Pj_local = local_params_j(4:6)';                 % 3x1
+    
+    % 构造 R_Pj = R_nominal * exp(delta)
     R_Pj_nominal = expSO3(phi_Pj_nominal);
     R_Pj = R_Pj_nominal * expSO3(delta_phi_Pj_local);
 
-    % 5) 单点残差与雅可比
-    [residual_j, J_j, f_P, R_PF, f_pred, R_F_pred]  = single_measurement_jacobian( ...
-        l_meas_j, f_meas_j, R_F_meas, q_serial_j, p_j, R_Pj, ...
+    % 为当前测量点计算残差和雅可比
+    [residual_j, J_j,f_P,R_PF,f_pred,R_F_pred ]  = single_measurement_jacobian(...
+        l_meas_j, f_meas_j, R_GF, q_serial_j, p_j, R_Pj, ...
         nominal_params, delta_A, delta_B, delta_l, delta_phi, T_P_B_actual, ...
         n_deltaA, n_deltaB, n_deltal, n_deltaphi, n_delta_psi, n_local_per_measurement, nominal_params.T_G_M);
+    
+    f_P_all(j,:)=f_P;
+    R_PF_all(:,:,j)=R_PF;
+    f_pred_all(j,:)=f_pred;
+    R_F_pred_all(:,:,j)=R_F_pred;
 
-    % 6) 填充总残差、总雅可比
+    % 在总残差和雅可比中的位置
     residual_start = (j-1)*n_residuals_per_measurement + 1;
-    residual_end   = residual_start + n_residuals_per_measurement - 1;
-
+    residual_end = residual_start + n_residuals_per_measurement - 1;
     E(residual_start:residual_end) = residual_j;
-
+    
     J_start_row = residual_start;
-    J_end_row   = residual_end;
-
-    J(J_start_row:J_end_row, idx_deltaA)    = J_j(:, 1:n_deltaA);
-    J(J_start_row:J_end_row, idx_deltaB)    = J_j(:, n_deltaA+1:n_deltaA+n_deltaB);
-    J(J_start_row:J_end_row, idx_deltal)    = J_j(:, n_deltaA+n_deltaB+1:n_deltaA+n_deltaB+n_deltal);
+    J_end_row = residual_end;
+    
+    J(J_start_row:J_end_row, idx_deltaA) = J_j(:, 1:n_deltaA);
+    J(J_start_row:J_end_row, idx_deltaB) = J_j(:, n_deltaA+1:n_deltaA+n_deltaB);
+    J(J_start_row:J_end_row, idx_deltal) = J_j(:, n_deltaA+n_deltaB+1:n_deltaA+n_deltaB+n_deltal);
     J(J_start_row:J_end_row, idx_delta_psi) = J_j(:, n_deltaA+n_deltaB+n_deltal+1:n_deltaA+n_deltaB+n_deltal+n_delta_psi);
-    J(J_start_row:J_end_row, idx_deltaphi)  = J_j(:, n_deltaA+n_deltaB+n_deltal+n_delta_psi+1:n_deltaA+n_deltaB+n_deltal+n_delta_psi+n_deltaphi);
-
+    J(J_start_row:J_end_row, idx_deltaphi) = J_j(:, n_deltaA+n_deltaB+n_deltal+n_delta_psi+1:n_deltaA+n_deltaB+n_deltal+n_delta_psi+n_deltaphi);
     J(J_start_row:J_end_row, local_param_indices{j}) = J_j(:, n_deltaA+n_deltaB+n_deltal+n_delta_psi+n_deltaphi+1:end);
 
 end
 
-%% 返回参数结构
-params.indices.deltaA     = idx_deltaA;
-params.indices.deltaB     = idx_deltaB;
-params.indices.deltal     = idx_deltal;
-params.indices.deltaphi   = idx_deltaphi;
-params.indices.delta_psi  = idx_delta_psi;
-params.indices.local      = local_param_indices;
 
-params.sizes.n_total      = n_total_params;
-params.sizes.n_residuals  = n_total_residuals;
-params.sizes.deltaphi     = n_deltaphi;
+params.indices.deltaA = idx_deltaA;
+params.indices.deltaB = idx_deltaB;
+params.indices.deltal = idx_deltal;
+params.indices.deltaphi = idx_deltaphi;
+params.indices.delta_psi = idx_delta_psi;  
+params.indices.local = local_param_indices;
+params.sizes.n_total = n_total_params;
+params.sizes.n_residuals = n_total_residuals;
+params.sizes.deltaphi = n_deltaphi;  
 
 end
-
-%% ================== helper：P 测量 -> G（不使用 dRF） ==================
-function [p_G, R_GX] = transform_pose_to_global_no_dRF(p_M, eul_M_zyx, T_G_M)
-
-    R_G_M = T_G_M(1:3,1:3);
-    t_G_M = T_G_M(1:3,4);
-
-    p_G = R_G_M * p_M(:) + t_G_M(:);
-
-    % eul2rotm 对 'ZYX' 的输入是 [yaw pitch roll] = [z y x]
-    if iscolumn(eul_M_zyx), eul_M_zyx = eul_M_zyx.'; end
-    R_MX = eul2rotm(eul_M_zyx, 'ZYX');
-
-    R_GX = R_G_M * R_MX;
-end
-
 
 
 
@@ -184,8 +150,6 @@ function [residual_j, J_j,f_P,R_PF,f_pred,R_F_pred ] = single_measurement_jacobi
     p_j, R_Pj, ...  
     nominal_params, delta_A, delta_B, delta_l, delta_phi,T_P_B_actual, ...
     n_deltaA, n_deltaB, n_deltal, n_deltaphi, n_delta_psi, n_local_per_measurement,T_G_M)
-% 单次测量的雅可比矩阵计算函数
-% 考虑安装误差变换矩阵${}^{P}\boldsymbol{T}_{B}$的影响
 % 输入参数:
 %   delta_phi - 6×1几何参数误差向量 [Δa4, Δa5, Δa7, Δd3, Δd5, Δd7]
 %   delta_psi - 6×1安装误差参数 [位置偏移(3), 方向偏移(3)]
@@ -285,7 +249,7 @@ J_serial(1:3, idx_deltaphi) = -R_Pj * R_PB * J_geo_f;
 
 
 %% 6.2 姿态残差雅可比（基于右误差模型的正确形式）
-J_r_inv = inverse_right_jacobian_so3(-orient_residual);
+J_r_inv = inverse_right_jacobian_so3(orient_residual);
 J_geo_omega = J_geo(4:6, :);  % 3x6: mapping delta_phi -> small-rot-vector in B-frame
 
 C = - J_r_inv * (R_F_pred') ;
@@ -299,7 +263,6 @@ J_serial(4:6, idx_delta_psi(4:6)) = -J_r_inv * (R_BF');
 % 3. 对串联臂几何参数的偏导 (delta_phi_F 在B系，需 R_Pj*R_PB 转到G系)
 J_serial(4:6, idx_deltaphi) = C * R_Pj * R_PB *  J_geo_omega; 
 
-% 确保位置参数雅可比为零
 J_serial(4:6, idx_delta_psi(1:3)) = zeros(3,3);
 
 
@@ -320,27 +283,6 @@ end
 
 
 function [f_global, R_GF] = transform_measurement_to_global(f_meas, theta_meas_rpy, T_G_M)
-% % theta_meas_rpy: [roll, pitch, yaw] (r, p, y)
-% % Returns theta_global in same ordering: [roll, pitch, yaw]
-% 
-% R_G_M = T_G_M(1:3,1:3);
-% t_G_M = T_G_M(1:3,4);
-% 
-% % Convert [roll,pitch,yaw] -> [yaw,pitch,roll] for ZYX constructor
-% eul_for_matlab = [ theta_meas_rpy(3), theta_meas_rpy(2), theta_meas_rpy(1) ]; % [z y x]
-% 
-% % rotation matrix of measured frame F in measurement coords
-% R_F_meas = eul2rotm(eul_for_matlab, 'ZYX');
-% 
-% % transform position and rotation to global
-% f_global = R_G_M * f_meas + t_G_M
-% R_F_global = R_G_M * R_F_meas;
-% 
-% % convert back to Euler (MATLAB returns [z y x] for 'ZYX')
-% eul_global_zyx = rotm2eul(R_F_global, 'ZYX'); % -> [yaw, pitch, roll]
-% % reorder back to [roll, pitch, yaw] to keep same external convention
-% theta_global = [ eul_global_zyx(3), eul_global_zyx(2), eul_global_zyx(1) ]
-
 
 % 提取旋转矩阵和平移向量
 R_G_M = T_G_M(1:3, 1:3);
