@@ -21,8 +21,8 @@ weights = struct();
 
 % 系统残差权重
 weights.w_l  = 1e10;
-weights.w_Fp = 1e10;
-weights.w_Fr = 1e10;
+weights.w_Fp = 1e8;
+weights.w_Fr = 1e8;
 
 % 局部变量软约束权重
 weights.w_anchor   = 1e4;
@@ -480,3 +480,4 @@ function x = params_to_vector(param_errors, nominal_params, m) %#ok<INUSD>
 
     x(idx:end) = reshape(param_errors.local_params.', [], 1);
 end
+
