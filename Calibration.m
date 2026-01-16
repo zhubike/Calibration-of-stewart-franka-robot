@@ -1,5 +1,4 @@
 clear; clc
-fprintf('=== 串并混联系统标定  LM 变量投影  连续性软约束  全局先验正则 ===\n');
 
 %% 1 数据
 fprintf('1 数据读取...\n');
@@ -480,4 +479,5 @@ function x = params_to_vector(param_errors, nominal_params, m) %#ok<INUSD>
 
     x(idx:end) = reshape(param_errors.local_params.', [], 1);
 end
+
 
