@@ -2,7 +2,7 @@ clear; clc
 
 %% 1 数据
 fprintf('1 数据读取...\n');
-load('measured_data_withP.mat');
+load('measured_data.mat');
 measurement_data = filtered_measurement_data;
 m = length(measurement_data);
 fprintf('共 %d 个测量点\n', m);
@@ -479,5 +479,6 @@ function x = params_to_vector(param_errors, nominal_params, m) %#ok<INUSD>
 
     x(idx:end) = reshape(param_errors.local_params.', [], 1);
 end
+
 
 
